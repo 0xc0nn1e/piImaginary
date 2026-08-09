@@ -1,0 +1,19 @@
+[Unit]
+Description=Raspberry Pi audio recorder and upload client
+After=local-fs.target network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi-recorder
+Group=audio
+WorkingDirectory=/opt/pi-recorder
+EnvironmentFile=/etc/pi-recorder/pi-recorder.env
+ExecStart=/opt/pi-recorder/.venv/bin/python -m pi_recorder
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

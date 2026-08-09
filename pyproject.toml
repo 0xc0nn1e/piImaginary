@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-recorder-client"
+version = "0.1.0"
+description = "Reliable low-resource audio recorder and upload client for Raspberry Pi"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = []
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7,<9"]
+
+[project.scripts]
+pi-recorder = "pi_recorder.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["src"]
+testpaths = ["tests"]
