@@ -35,14 +35,57 @@ sudo apt install -y alsa-utils python3 python3-venv
 arecord -l
 ```
 
-Test the selected microphone before running the service:
+### Select the USB microphone explicitly
+
+Do not rely on ALSA's `default` input when the recorder must use only the USB microphone. Raspberry Pi boards do not have a built-in microphone, but `default` may still resolve to another attached audio device. Connect the USB microphone, then list hardware and named ALSA devices:
 
 ```bash
-arecord -D default -t wav -f S16_LE -r 16000 -c 1 -d 5 test.wav
-aplay test.wav
+arecord -l
+arecord -L
 ```
 
-If needed, replace `default` with an ALSA device such as `plughw:CARD=Device,DEV=0`.
+Find the USB entry, for example `card 1: Device [USB PnP Sound Device], device 0`. Prefer the card name from that output instead of the numeric card index, which can change after a reboot. Test that exact device with `plughw`, which can adapt the microphone's native format to the required mono 16 kHz PCM format:
+
+```bash
+arecord -D plughw:CARD=Device,DEV=0 -t wav -f S16_LE -r 16000 -c 1 -d 5 usb-test.wav
+aplay usb-test.wav
+```
+
+Replace `Device` with the card name shown on your Pi, then set the same value in `.env`:
+
+```dotenv
+AUDIO_DEVICE=plughw:CARD=Device,DEV=0
+```
+
+If capture is silent or distorted, use `alsamixer`, press F6, select the USB card, and adjust its Capture level. On a Pi Zero 2 W, an unstable microphone or repeated USB disconnects can indicate insufficient power; try a powered USB hub. Avoid `AUDIO_DEVICE=default` when selecting the USB microphone is mandatory.
+
+## macOS Development and USB Microphone Test
+
+macOS does not provide `apt`, ALSA, or `arecord`. Use it for development, unit tests, queue/upload integration tests, and a separate USB microphone smoke test. The production recording command remains Linux-only, so do not run `python -m pi_recorder` for audio capture on macOS and do not set `ARECORD_BINARY=ffmpeg`; their command-line interfaces are different.
+
+With [Homebrew](https://brew.sh/) installed:
+
+```bash
+brew install python@3.12 ffmpeg
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest -q
+```
+
+Connect the USB microphone. In **System Settings → Sound → Input**, select the USB microphone, not the Mac microphone. Apple documents this under [Sound Input settings](https://support.apple.com/guide/mac-help/change-the-sound-input-settings-mchlp2567/mac). Then list AVFoundation devices:
+
+```bash
+ffmpeg -f avfoundation -list_devices true -i ""
+```
+
+Under `AVFoundation audio devices`, find the USB microphone's index, replace `N` below, and select it explicitly. Do not use `:default` because that could select the internal microphone.
+
+```bash
+ffmpeg -f avfoundation -i ":N" -t 5 -ac 1 -ar 16000 -c:a pcm_s16le usb-test.wav
+afplay usb-test.wav
+```
+
+The first capture may ask for microphone permission for Terminal. The device syntax follows the [FFmpeg AVFoundation input documentation](https://ffmpeg.org/ffmpeg-devices.html#avfoundation). A future macOS audio-source adapter would be required for a full end-to-end recorder run; it is not part of the Raspberry Pi MVP.
 
 ## Install and Configure
 
@@ -58,7 +101,7 @@ Edit `.env`. Important settings are:
 
 ```dotenv
 DEVICE_ID=pi-recorder-01
-AUDIO_DEVICE=default
+AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 RECORDING_DIR=./data/recordings
 DATABASE_PATH=./data/recorder.db
 CHUNK_MINUTES=10
@@ -70,6 +113,8 @@ MIN_FREE_DISK_MB=512
 ```
 
 `SERVER_URL` must use HTTPS. Leave it empty to record and queue locally without uploading. Never commit `.env`, tokens, databases, or recordings.
+
+Replace `Device` with the USB card name reported by `arecord -l` or `arecord -L` on the target Pi.
 
 ## Run Manually
 

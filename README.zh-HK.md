@@ -35,14 +35,57 @@ sudo apt install -y alsa-utils python3 python3-venv
 arecord -l
 ```
 
-啟動 service 前先測試 microphone：
+### 明確選擇 USB microphone
+
+如果 recorder 只可以用 USB microphone，就唔好依賴 ALSA `default` input。Raspberry Pi 本身無內置 microphone，但 `default` 仍有可能指向另一個已連接嘅 audio device。插入 USB microphone 後，列出 hardware 同有名稱嘅 ALSA devices：
 
 ```bash
-arecord -D default -t wav -f S16_LE -r 16000 -c 1 -d 5 test.wav
-aplay test.wav
+arecord -l
+arecord -L
 ```
 
-如有需要，可將 `default` 改成 `plughw:CARD=Device,DEV=0` 等 ALSA device。
+搵出 USB entry，例如 `card 1: Device [USB PnP Sound Device], device 0`。最好用輸出入面嘅 card name，唔好用 reboot 後可能改變嘅 card number。用 `plughw` 測試指定 device；佢可以將 microphone 原生格式轉成所需嘅 mono 16 kHz PCM：
+
+```bash
+arecord -D plughw:CARD=Device,DEV=0 -t wav -f S16_LE -r 16000 -c 1 -d 5 usb-test.wav
+aplay usb-test.wav
+```
+
+將 `Device` 換成你部 Pi 顯示嘅 card name，再將同一個值寫入 `.env`：
+
+```dotenv
+AUDIO_DEVICE=plughw:CARD=Device,DEV=0
+```
+
+如果錄音無聲或者失真，執行 `alsamixer`、按 F6、選 USB card，再調整 Capture level。Pi Zero 2 W 如果 microphone 唔穩定或者不停 USB disconnect，可能係供電不足，可以試 powered USB hub。一定要指定 USB microphone 時，避免使用 `AUDIO_DEVICE=default`。
+
+## macOS Development 同 USB Microphone 測試
+
+macOS 無 `apt`、ALSA 或 `arecord`。Mac 可以用嚟做 development、unit tests、queue/upload integration tests，同埋獨立 USB microphone smoke test。Production recording command 仍然只支援 Linux，所以唔好喺 macOS 用 `python -m pi_recorder` 做 audio capture，亦唔好設定 `ARECORD_BINARY=ffmpeg`；兩者 CLI 並唔相容。
+
+先安裝 [Homebrew](https://brew.sh/)，然後執行：
+
+```bash
+brew install python@3.12 ffmpeg
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest -q
+```
+
+插入 USB microphone，去 **System Settings → Sound → Input** 揀 USB microphone，唔好揀 Mac microphone。Apple 嘅步驟見 [Sound Input settings](https://support.apple.com/guide/mac-help/change-the-sound-input-settings-mchlp2567/mac)。之後列出 AVFoundation devices：
+
+```bash
+ffmpeg -f avfoundation -list_devices true -i ""
+```
+
+喺 `AVFoundation audio devices` 下面搵 USB microphone index，將以下 `N` 換成該 index，明確指定 USB input。唔好用 `:default`，因為佢可能會揀 internal microphone。
+
+```bash
+ffmpeg -f avfoundation -i ":N" -t 5 -ac 1 -ar 16000 -c:a pcm_s16le usb-test.wav
+afplay usb-test.wav
+```
+
+第一次錄音時，macOS 可能會要求授予 Terminal microphone permission。Device syntax 來自 [FFmpeg AVFoundation input 文件](https://ffmpeg.org/ffmpeg-devices.html#avfoundation)。如果要喺 Mac 做完整 end-to-end recorder，日後需要另一個 macOS audio-source adapter；佢唔屬 Raspberry Pi MVP。
 
 ## 安裝同設定
 
@@ -58,7 +101,7 @@ cp .env.example .env
 
 ```dotenv
 DEVICE_ID=pi-recorder-01
-AUDIO_DEVICE=default
+AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 RECORDING_DIR=./data/recordings
 DATABASE_PATH=./data/recorder.db
 CHUNK_MINUTES=10
@@ -70,6 +113,8 @@ MIN_FREE_DISK_MB=512
 ```
 
 `SERVER_URL` 必須用 HTTPS。留空就只錄音及保存在本機 queue，唔會 upload。永遠唔好 commit `.env`、token、database 或錄音。
+
+將 `Device` 換成 target Pi 上 `arecord -l` 或 `arecord -L` 顯示嘅 USB card name。
 
 ## 手動運行
 

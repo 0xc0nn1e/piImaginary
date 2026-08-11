@@ -35,14 +35,57 @@ sudo apt install -y alsa-utils python3 python3-venv
 arecord -l
 ```
 
-Service を起動する前に microphone を確認します。
+### USB microphone を明示的に選択する
+
+Recorder が USB microphone だけを使用する場合、ALSA の `default` input に依存しないでください。Raspberry Pi 本体に内蔵 microphone はありませんが、`default` が別の接続済み audio device を指す可能性があります。USB microphone を接続し、hardware と名前付き ALSA devices を表示します。
 
 ```bash
-arecord -D default -t wav -f S16_LE -r 16000 -c 1 -d 5 test.wav
-aplay test.wav
+arecord -l
+arecord -L
 ```
 
-必要に応じて `default` を `plughw:CARD=Device,DEV=0` などの ALSA device に変更してください。
+たとえば `card 1: Device [USB PnP Sound Device], device 0` のような USB entry を探します。Reboot 後に変わる可能性がある card number ではなく、出力された card name を使用してください。`plughw` は microphone の native format を必要な mono 16 kHz PCM に変換できるため、次のように指定 device をテストします。
+
+```bash
+arecord -D plughw:CARD=Device,DEV=0 -t wav -f S16_LE -r 16000 -c 1 -d 5 usb-test.wav
+aplay usb-test.wav
+```
+
+`Device` を Pi に表示された card name に置き換え、同じ値を `.env` に設定します。
+
+```dotenv
+AUDIO_DEVICE=plughw:CARD=Device,DEV=0
+```
+
+録音が無音または歪む場合は `alsamixer` を実行し、F6 で USB card を選び、Capture level を調整します。Pi Zero 2 W で microphone が不安定、または USB disconnect が繰り返される場合は電力不足の可能性があるため、powered USB hub を試してください。USB microphone の指定が必須なら `AUDIO_DEVICE=default` は使用しません。
+
+## macOS Development と USB Microphone テスト
+
+macOS には `apt`、ALSA、`arecord` がありません。Mac は development、unit tests、queue/upload integration tests、独立した USB microphone smoke test に使用できます。Production recording command は Linux 専用なので、macOS で `python -m pi_recorder` を audio capture 用に実行しないでください。また `ARECORD_BINARY=ffmpeg` も設定しないでください。両者の CLI は互換ではありません。
+
+[Homebrew](https://brew.sh/) をインストールしてから実行します。
+
+```bash
+brew install python@3.12 ffmpeg
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest -q
+```
+
+USB microphone を接続し、**System Settings → Sound → Input** で Mac microphone ではなく USB microphone を選びます。Apple の手順は [Sound Input settings](https://support.apple.com/guide/mac-help/change-the-sound-input-settings-mchlp2567/mac) を参照してください。次に AVFoundation devices を表示します。
+
+```bash
+ffmpeg -f avfoundation -list_devices true -i ""
+```
+
+`AVFoundation audio devices` の USB microphone index を確認し、次の `N` をその index に置き換えて USB input を明示的に指定します。`:default` は internal microphone を選ぶ可能性があるため使用しません。
+
+```bash
+ffmpeg -f avfoundation -i ":N" -t 5 -ac 1 -ar 16000 -c:a pcm_s16le usb-test.wav
+afplay usb-test.wav
+```
+
+初回録音時に macOS が Terminal の microphone permission を要求する場合があります。Device syntax は [FFmpeg AVFoundation input documentation](https://ffmpeg.org/ffmpeg-devices.html#avfoundation) に基づきます。Mac で完全な end-to-end recorder を実行するには、将来別の macOS audio-source adapter が必要です。これは Raspberry Pi MVP の対象外です。
 
 ## インストールと設定
 
@@ -58,7 +101,7 @@ cp .env.example .env
 
 ```dotenv
 DEVICE_ID=pi-recorder-01
-AUDIO_DEVICE=default
+AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 RECORDING_DIR=./data/recordings
 DATABASE_PATH=./data/recorder.db
 CHUNK_MINUTES=10
@@ -70,6 +113,8 @@ MIN_FREE_DISK_MB=512
 ```
 
 `SERVER_URL` は HTTPS が必須です。空欄の場合は録音とローカル queue 保存だけを行います。`.env`、token、database、録音ファイルは commit しないでください。
+
+`Device` を target Pi の `arecord -l` または `arecord -L` に表示された USB card name に置き換えてください。
 
 ## 手動実行
 
