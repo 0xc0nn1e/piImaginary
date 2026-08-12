@@ -49,6 +49,7 @@ def _positive_int(values: Mapping[str, str], name: str, default: int) -> int:
 @dataclass(frozen=True)
 class Config:
     device_id: str
+    audio_backend: str
     audio_device: str
     recording_dir: Path
     database_path: Path
@@ -57,6 +58,7 @@ class Config:
     audio_channels: int
     audio_sample_format: str
     arecord_binary: str
+    ffmpeg_binary: str
     server_url: str
     upload_endpoint: str
     api_token: str = field(repr=False)
@@ -121,6 +123,10 @@ class Config:
         if audio_format != "S16_LE":
             raise ConfigError("MVP supports AUDIO_SAMPLE_FORMAT=S16_LE only")
 
+        audio_backend = values.get("AUDIO_BACKEND", "auto").strip().lower()
+        if audio_backend not in {"auto", "alsa", "avfoundation"}:
+            raise ConfigError("AUDIO_BACKEND must be auto, alsa, or avfoundation")
+
         chunk_minutes = _positive_int(values, "CHUNK_MINUTES", 10)
         retry_base = _positive_int(values, "RETRY_BASE_SECONDS", 30)
         retry_max = _positive_int(values, "RETRY_MAX_SECONDS", 3600)
@@ -129,6 +135,7 @@ class Config:
 
         return cls(
             device_id=device_id,
+            audio_backend=audio_backend,
             audio_device=values.get("AUDIO_DEVICE", "default").strip() or "default",
             recording_dir=Path(values.get("RECORDING_DIR", "./data/recordings")).expanduser(),
             database_path=Path(values.get("DATABASE_PATH", "./data/recorder.db")).expanduser(),
@@ -137,6 +144,7 @@ class Config:
             audio_channels=_positive_int(values, "AUDIO_CHANNELS", 1),
             audio_sample_format=audio_format,
             arecord_binary=values.get("ARECORD_BINARY", "arecord").strip() or "arecord",
+            ffmpeg_binary=values.get("FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg",
             server_url=server_url,
             upload_endpoint=endpoint,
             api_token=values.get("API_TOKEN", ""),

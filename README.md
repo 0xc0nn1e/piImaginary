@@ -7,21 +7,24 @@ A low-resource, failure-tolerant audio recorder and upload client for Raspberry 
 ## Architecture
 
 ```text
-USB microphone -> arecord -> .wav.partial -> validate and atomic rename
-                                               |
-                                               v
-                                      WAV file + SQLite queue
-                                               |
-                                  uploader thread over HTTPS
-                                               v
-                                        remote server API
+USB microphone -> ALSA arecord (Linux) / FFmpeg AVFoundation (macOS)
+                                  |
+                                  v
+                         .wav.partial -> validate and atomic rename
+                                                  |
+                                                  v
+                                         WAV file + SQLite queue
+                                                  |
+                                     uploader thread over HTTPS
+                                                  v
+                                           remote server API
 ```
 
 The recorder never waits for the uploader. Only closed, validated files enter the queue. A reboot changes stale `uploading` entries back to `pending`; failed uploads use capped exponential backoff. Cleanup selects only server-confirmed `uploaded` files.
 
 ## Hardware and Audio Format
 
-The primary target is Raspberry Pi Zero 2 W (512 MB) on Raspberry Pi OS with a USB microphone. Pi 4 and Pi 5 are also supported in principle. I2S input is future work.
+The primary target is Raspberry Pi Zero 2 W (512 MB) on Raspberry Pi OS with a USB microphone. Pi 4 and Pi 5 are also supported in principle. macOS is a supported secondary runtime through FFmpeg AVFoundation. I2S input is future work.
 
 The MVP uses mono, 16 kHz, 16-bit PCM WAV in 10-minute chunks. WAV is native to `arecord`, has negligible encoding cost, and is widely accepted by transcription systems. It uses about 18.3 MiB per 10 minutes (about 2.76 GB/day). FLAC would reduce storage without loss but adds an encoder and another failure boundary; Opus is smaller but lossy and also needs extra tooling. Compression should later run after capture in a separate worker.
 
@@ -59,9 +62,9 @@ AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 
 If capture is silent or distorted, use `alsamixer`, press F6, select the USB card, and adjust its Capture level. On a Pi Zero 2 W, an unstable microphone or repeated USB disconnects can indicate insufficient power; try a powered USB hub. Avoid `AUDIO_DEVICE=default` when selecting the USB microphone is mandatory.
 
-## macOS Development and USB Microphone Test
+## macOS Setup and Recording
 
-macOS does not provide `apt`, ALSA, or `arecord`. Use it for development, unit tests, queue/upload integration tests, and a separate USB microphone smoke test. The production recording command remains Linux-only, so do not run `python -m pi_recorder` for audio capture on macOS and do not set `ARECORD_BINARY=ffmpeg`; their command-line interfaces are different.
+macOS uses the FFmpeg AVFoundation backend instead of Linux ALSA. It supports the full recorder flow: chunk finalization, local SQLite queue, upload, retry, cleanup, and graceful shutdown.
 
 With [Homebrew](https://brew.sh/) installed:
 
@@ -85,7 +88,23 @@ ffmpeg -f avfoundation -i ":N" -t 5 -ac 1 -ar 16000 -c:a pcm_s16le usb-test.wav
 afplay usb-test.wav
 ```
 
-The first capture may ask for microphone permission for Terminal. The device syntax follows the [FFmpeg AVFoundation input documentation](https://ffmpeg.org/ffmpeg-devices.html#avfoundation). A future macOS audio-source adapter would be required for a full end-to-end recorder run; it is not part of the Raspberry Pi MVP.
+The first capture may ask for microphone permission for Terminal. The device syntax follows the [FFmpeg AVFoundation input documentation](https://ffmpeg.org/ffmpeg-devices.html#avfoundation). Configure the same USB index in `.env`:
+
+```dotenv
+AUDIO_BACKEND=avfoundation
+AUDIO_DEVICE=N
+FFMPEG_BINARY=ffmpeg
+```
+
+Run the complete recorder:
+
+```bash
+.venv/bin/python -m pi_recorder
+```
+
+`AUDIO_BACKEND=auto` also selects AVFoundation automatically on macOS. Explicit `avfoundation` is recommended while diagnosing a new setup. If macOS denied microphone access, enable your terminal application under **System Settings → Privacy & Security → Microphone**, then restart the recorder.
+
+The macOS backend intentionally rejects `AUDIO_DEVICE=default` so it cannot silently record from the internal microphone.
 
 ## Install and Configure
 
@@ -101,6 +120,7 @@ Edit `.env`. Important settings are:
 
 ```dotenv
 DEVICE_ID=pi-recorder-01
+AUDIO_BACKEND=auto
 AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 RECORDING_DIR=./data/recordings
 DATABASE_PATH=./data/recorder.db
@@ -114,7 +134,7 @@ MIN_FREE_DISK_MB=512
 
 `SERVER_URL` must use HTTPS. Leave it empty to record and queue locally without uploading. Never commit `.env`, tokens, databases, or recordings.
 
-Replace `Device` with the USB card name reported by `arecord -l` or `arecord -L` on the target Pi.
+On Raspberry Pi, replace `Device` with the USB card name reported by `arecord -l` or `arecord -L`. On macOS, use `AUDIO_BACKEND=avfoundation` and replace `AUDIO_DEVICE` with the USB index reported by FFmpeg.
 
 ## Run Manually
 
@@ -174,6 +194,8 @@ Tests use a fake audio source and small generated WAV files; microphone hardware
 ## Troubleshooting
 
 - `arecord: not found`: install `alsa-utils` or set `ARECORD_BINARY`.
+- `ffmpeg executable not found`: on macOS, run `brew install ffmpeg`.
+- macOS input errors: verify `AUDIO_DEVICE` against the current AVFoundation list and allow microphone access for the terminal application. Device indices may change after reconnecting hardware.
 - Device errors: run `arecord -l`, verify `AUDIO_DEVICE`, group membership, and that no other process owns the microphone.
 - Files remain pending: verify HTTPS URL, DNS/Wi-Fi, token, and `journalctl`; recording continues while the server is unavailable.
 - Disk warning: upload or network service must recover. Only confirmed uploads are removed, even under low-space pressure.

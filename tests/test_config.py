@@ -12,6 +12,8 @@ def test_config_defaults() -> None:
     assert config.chunk_seconds == 600
     assert config.sample_rate == 16000
     assert config.audio_channels == 1
+    assert config.audio_backend == "auto"
+    assert config.ffmpeg_binary == "ffmpeg"
     assert not config.upload_enabled
 
 
@@ -40,6 +42,7 @@ def test_config_loads_env_file_and_environment_override(tmp_path: Path) -> None:
         {"RETRY_BASE_SECONDS": "60", "RETRY_MAX_SECONDS": "30"},
         {"DEVICE_ID": "not valid"},
         {"AUDIO_SAMPLE_FORMAT": "FLOAT_LE"},
+        {"AUDIO_BACKEND": "unknown"},
     ],
 )
 def test_config_rejects_invalid_values(values) -> None:

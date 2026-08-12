@@ -5,7 +5,12 @@ from threading import Event
 from types import FrameType
 from typing import Optional
 
-from pi_recorder.audio import ArecordAudioSource
+from pi_recorder.audio import (
+    ArecordAudioSource,
+    AudioSource,
+    FfmpegAvfoundationAudioSource,
+    resolve_audio_backend,
+)
 from pi_recorder.cleanup import CleanupManager
 from pi_recorder.config import Config, ConfigError
 from pi_recorder.logging_config import configure_logging
@@ -16,6 +21,33 @@ from pi_recorder.uploader import HttpUploadClient, UploaderWorker
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def build_audio_source(config: Config) -> AudioSource:
+    backend = resolve_audio_backend(config.audio_backend)
+    if backend == "alsa":
+        source: AudioSource = ArecordAudioSource(
+            binary=config.arecord_binary,
+            device=config.audio_device,
+            sample_rate=config.sample_rate,
+            channels=config.audio_channels,
+            sample_format=config.audio_sample_format,
+        )
+    elif backend == "avfoundation":
+        if config.audio_device.lower() == "default":
+            raise ValueError(
+                "macOS requires an explicit AUDIO_DEVICE index to avoid the internal microphone"
+            )
+        source = FfmpegAvfoundationAudioSource(
+            binary=config.ffmpeg_binary,
+            device=config.audio_device,
+            sample_rate=config.sample_rate,
+            channels=config.audio_channels,
+        )
+    else:
+        raise ValueError("Unsupported audio backend: {}".format(backend))
+    LOGGER.info("Using %s audio backend with device %s", backend, config.audio_device)
+    return source
 
 
 def run(config: Config) -> int:
@@ -43,13 +75,7 @@ def run(config: Config) -> int:
     )
     cleanup.run()
 
-    audio_source = ArecordAudioSource(
-        binary=config.arecord_binary,
-        device=config.audio_device,
-        sample_rate=config.sample_rate,
-        channels=config.audio_channels,
-        sample_format=config.audio_sample_format,
-    )
+    audio_source = build_audio_source(config)
     recorder = Recorder(
         audio_source=audio_source,
         storage=storage,

@@ -7,21 +7,24 @@
 ## Architecture
 
 ```text
-USB microphone -> arecord -> .wav.partial -> 驗證及 atomic rename
-                                               |
-                                               v
-                                       WAV + SQLite queue
-                                               |
-                                      HTTPS uploader thread
-                                               v
-                                         remote server API
+USB microphone -> ALSA arecord（Linux）/ FFmpeg AVFoundation（macOS）
+                                  |
+                                  v
+                         .wav.partial -> 驗證及 atomic rename
+                                                  |
+                                                  v
+                                          WAV + SQLite queue
+                                                  |
+                                         HTTPS uploader thread
+                                                  v
+                                            remote server API
 ```
 
 Recorder 永遠唔等 uploader。只有已關閉兼驗證成功嘅檔案先入 queue。重啟時，殘留嘅 `uploading` 會還原做 `pending`；失敗 upload 會用有上限嘅 exponential backoff。Cleanup 只會揀 server 已確認嘅 `uploaded` 檔案。
 
 ## Hardware 同 Audio Format
 
-主要 target 係 Raspberry Pi Zero 2 W（512 MB）、Raspberry Pi OS 同 USB microphone。設計原則上亦支援 Pi 4／Pi 5；I2S input 留待日後加入。
+主要 target 係 Raspberry Pi Zero 2 W（512 MB）、Raspberry Pi OS 同 USB microphone。設計原則上亦支援 Pi 4／Pi 5；macOS 係透過 FFmpeg AVFoundation 支援嘅 secondary runtime。I2S input 留待日後加入。
 
 MVP 使用 mono、16 kHz、16-bit PCM WAV，每段預設 10 分鐘。WAV 係 `arecord` 原生格式，幾乎無 encoding CPU 成本，而且 transcription system 普遍支援；代價係每 10 分鐘約 18.3 MiB，即每日約 2.76 GB。FLAC 無損兼慳空間，但要多一個 encoder 同 failure boundary；Opus 更細，但屬有損兼要額外工具。日後 compression 應該放喺 capture 完成後嘅獨立 worker。
 
@@ -59,9 +62,9 @@ AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 
 如果錄音無聲或者失真，執行 `alsamixer`、按 F6、選 USB card，再調整 Capture level。Pi Zero 2 W 如果 microphone 唔穩定或者不停 USB disconnect，可能係供電不足，可以試 powered USB hub。一定要指定 USB microphone 時，避免使用 `AUDIO_DEVICE=default`。
 
-## macOS Development 同 USB Microphone 測試
+## macOS 設定同錄音
 
-macOS 無 `apt`、ALSA 或 `arecord`。Mac 可以用嚟做 development、unit tests、queue/upload integration tests，同埋獨立 USB microphone smoke test。Production recording command 仍然只支援 Linux，所以唔好喺 macOS 用 `python -m pi_recorder` 做 audio capture，亦唔好設定 `ARECORD_BINARY=ffmpeg`；兩者 CLI 並唔相容。
+macOS 會用 FFmpeg AVFoundation backend，唔使用 Linux ALSA。Mac 支援完整 recorder flow，包括 chunk finalization、本機 SQLite queue、upload、retry、cleanup 同 graceful shutdown。
 
 先安裝 [Homebrew](https://brew.sh/)，然後執行：
 
@@ -85,7 +88,25 @@ ffmpeg -f avfoundation -i ":N" -t 5 -ac 1 -ar 16000 -c:a pcm_s16le usb-test.wav
 afplay usb-test.wav
 ```
 
-第一次錄音時，macOS 可能會要求授予 Terminal microphone permission。Device syntax 來自 [FFmpeg AVFoundation input 文件](https://ffmpeg.org/ffmpeg-devices.html#avfoundation)。如果要喺 Mac 做完整 end-to-end recorder，日後需要另一個 macOS audio-source adapter；佢唔屬 Raspberry Pi MVP。
+第一次錄音時，macOS 可能會要求授予 Terminal microphone permission。Device syntax 來自 [FFmpeg AVFoundation input 文件](https://ffmpeg.org/ffmpeg-devices.html#avfoundation)。
+
+將同一個 USB index 寫入 `.env`：
+
+```dotenv
+AUDIO_BACKEND=avfoundation
+AUDIO_DEVICE=N
+FFMPEG_BINARY=ffmpeg
+```
+
+運行完整 recorder：
+
+```bash
+.venv/bin/python -m pi_recorder
+```
+
+`AUDIO_BACKEND=auto` 喺 macOS 亦會自動選擇 AVFoundation。新 setup 排查時建議先明確設定 `avfoundation`。如果 macOS 拒絕 microphone 權限，去 **System Settings → Privacy & Security → Microphone** 允許你使用嘅 terminal application，再重開 recorder。
+
+macOS backend 會刻意拒絕 `AUDIO_DEVICE=default`，避免程式靜默使用 internal microphone。
 
 ## 安裝同設定
 
@@ -101,6 +122,7 @@ cp .env.example .env
 
 ```dotenv
 DEVICE_ID=pi-recorder-01
+AUDIO_BACKEND=auto
 AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 RECORDING_DIR=./data/recordings
 DATABASE_PATH=./data/recorder.db
@@ -114,7 +136,7 @@ MIN_FREE_DISK_MB=512
 
 `SERVER_URL` 必須用 HTTPS。留空就只錄音及保存在本機 queue，唔會 upload。永遠唔好 commit `.env`、token、database 或錄音。
 
-將 `Device` 換成 target Pi 上 `arecord -l` 或 `arecord -L` 顯示嘅 USB card name。
+Raspberry Pi 要將 `Device` 換成 `arecord -l` 或 `arecord -L` 顯示嘅 USB card name。macOS 就設定 `AUDIO_BACKEND=avfoundation`，並將 `AUDIO_DEVICE` 換成 FFmpeg 顯示嘅 USB index。
 
 ## 手動運行
 
@@ -174,6 +196,8 @@ Client 用 `multipart/form-data` 發送 `POST {SERVER_URL}{UPLOAD_ENDPOINT}`：
 ## 故障排查
 
 - `arecord: not found`：安裝 `alsa-utils`，或者設定 `ARECORD_BINARY`。
+- `ffmpeg executable not found`：macOS 執行 `brew install ffmpeg`。
+- macOS input error：重新對照 AVFoundation device list，並確認 terminal application 有 microphone 權限。重新插拔 hardware 後 index 可能改變。
 - Device error：執行 `arecord -l`，檢查 `AUDIO_DEVICE`、group 權限，同 microphone 有冇畀其他 process 佔用。
 - 檔案一直 pending：檢查 HTTPS URL、DNS／Wi-Fi、token 同 `journalctl`；server offline 期間錄音仍會繼續。
 - Disk warning：要恢復 upload／網絡服務；即使低空間，程式都只會移除已確認 upload 嘅檔。
