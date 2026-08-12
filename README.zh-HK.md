@@ -26,7 +26,7 @@ Recorder 永遠唔等 uploader。只有已關閉兼驗證成功嘅檔案先入 q
 
 主要 target 係 Raspberry Pi Zero 2 W（512 MB）、Raspberry Pi OS 同 USB microphone。設計原則上亦支援 Pi 4／Pi 5；macOS 係透過 FFmpeg AVFoundation 支援嘅 secondary runtime。I2S input 留待日後加入。
 
-MVP 使用 mono、16 kHz、16-bit PCM WAV，每段預設 10 分鐘。WAV 係 `arecord` 原生格式，幾乎無 encoding CPU 成本，而且 transcription system 普遍支援；代價係每 10 分鐘約 18.3 MiB，即每日約 2.76 GB。FLAC 無損兼慳空間，但要多一個 encoder 同 failure boundary；Opus 更細，但屬有損兼要額外工具。日後 compression 應該放喺 capture 完成後嘅獨立 worker。
+MVP 使用 mono、16 kHz、16-bit PCM WAV，每段預設 10 分鐘。WAV 係 `arecord` 原生格式，幾乎無 encoding CPU 成本，而且 transcription system 普遍支援；代價係每 10 分鐘約 18.3 MiB，即每日約 2.76 GB。每個 WAV 上限係 98,000,000 bytes；audio 設定估算會超限時，程式會拒絕啟動，異常產生嘅超限檔亦只會保留，唔會入 queue 或 upload。FLAC 無損兼慳空間，但要多一個 encoder 同 failure boundary；Opus 更細，但屬有損兼要額外工具。日後 compression 應該放喺 capture 完成後嘅獨立 worker。
 
 ## Raspberry Pi OS 設定
 
@@ -127,6 +127,7 @@ AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 RECORDING_DIR=./data/recordings
 DATABASE_PATH=./data/recorder.db
 CHUNK_MINUTES=10
+MAX_WAV_BYTES=98000000
 SERVER_URL=https://recorder.example.com
 UPLOAD_ENDPOINT=/api/v1/recordings
 API_TOKEN=
@@ -145,6 +146,18 @@ Raspberry Pi 要將 `Device` 換成 `arecord -l` 或 `arecord -L` 顯示嘅 USB 
 ```
 
 用 `SIGINT` 或 `SIGTERM` 停止。程式會先關閉現有有效 partial chunk、計 checksum 同入 queue，然後退出。
+
+### 只 upload 一個現有 WAV（唔錄音）
+
+手動 uploader 會讀取同一份 `.env`、驗證 WAV 同 98,000,000-byte 上限、建立 metadata 及 SHA-256，然後用 progress bar 顯示單次 upload 進度：
+
+```bash
+.venv/bin/python -m pi_recorder.manual_upload /path/to/audio.wav
+# 安裝 package 後亦可用：
+.venv/bin/pi-recorder-upload /path/to/audio.wav
+```
+
+如要用另一份設定，可加 `--env-file /path/to/config.env`。呢個 command 唔會開 microphone、唔會寫入 SQLite queue、唔會喺 background retry，亦唔會刪除原檔。Upload 失敗會回傳非零 exit status；修正問題後手動再執行即可。
 
 ## 安裝 systemd Service
 
@@ -183,6 +196,8 @@ Client 用 `multipart/form-data` 發送 `POST {SERVER_URL}{UPLOAD_ENDPOINT}`：
 
 任何 HTTP 2xx 都代表 server 已確認保存；其他 response 會 retry。未來 server 必須以 recording ID 做 idempotency、驗證 size／checksum，並只可以喺 durable storage 完成後回覆 2xx。AI processing 要喺 ACK 之後做，唔可以阻塞 ingestion。
 
+Audio file 本身最多 98,000,000 bytes；完整 multipart request 會稍大，所以 reverse proxy 同 server request-body limit 要預留額外空間。
+
 ## Development 同測試
 
 ```bash
@@ -200,6 +215,7 @@ Client 用 `multipart/form-data` 發送 `POST {SERVER_URL}{UPLOAD_ENDPOINT}`：
 - macOS input error：重新對照 AVFoundation device list，並確認 terminal application 有 microphone 權限。重新插拔 hardware 後 index 可能改變。
 - Device error：執行 `arecord -l`，檢查 `AUDIO_DEVICE`、group 權限，同 microphone 有冇畀其他 process 佔用。
 - 檔案一直 pending：檢查 HTTPS URL、DNS／Wi-Fi、token 同 `journalctl`；server offline 期間錄音仍會繼續。
+- `WAV file ... maximum`：縮短 `CHUNK_MINUTES`、降低 sample rate／channels，或者先手動分割現有 WAV；超限檔唔會 upload。
 - Disk warning：要恢復 upload／網絡服務；即使低空間，程式都只會移除已確認 upload 嘅檔。
 - Configuration exit：檢查數值係正整數、device ID 字元，同 `SERVER_URL` 是否 HTTPS。
 

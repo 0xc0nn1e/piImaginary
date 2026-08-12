@@ -5,9 +5,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from threading import Event
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 from urllib.parse import urlparse
 
+from pi_recorder.config import DEFAULT_MAX_WAV_BYTES
 from pi_recorder.models import RecordingMetadata
 from pi_recorder.queue import UploadQueue
 
@@ -31,18 +32,39 @@ class HttpUploadClient:
         endpoint: str,
         api_token: str,
         timeout_seconds: int,
+        max_wav_bytes: int = DEFAULT_MAX_WAV_BYTES,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self.endpoint = endpoint
         self.api_token = api_token
         self.timeout_seconds = timeout_seconds
+        self.max_wav_bytes = max_wav_bytes
 
-    def upload(self, recording: RecordingMetadata) -> None:
+    def upload(
+        self,
+        recording: RecordingMetadata,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
         parsed = urlparse(self.server_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise UploadError("Invalid server URL")
         if not recording.file_path.is_file():
             raise UploadError("Audio file is missing")
+        actual_size = recording.file_path.stat().st_size
+        if actual_size > self.max_wav_bytes:
+            raise UploadError(
+                "WAV file is {} bytes; maximum is {} bytes".format(
+                    actual_size,
+                    self.max_wav_bytes,
+                )
+            )
+        if actual_size != recording.file_size:
+            raise UploadError(
+                "Audio file size changed from {} to {} bytes".format(
+                    recording.file_size,
+                    actual_size,
+                )
+            )
 
         boundary = "pi-recorder-{}".format(uuid.uuid4().hex)
         metadata_json = json.dumps(
@@ -73,7 +95,7 @@ class HttpUploadClient:
             len(metadata_part)
             + len(checksum_part)
             + len(audio_header)
-            + recording.file_path.stat().st_size
+            + actual_size
             + len(closing)
         )
 
@@ -97,9 +119,15 @@ class HttpUploadClient:
             connection.send(metadata_part)
             connection.send(checksum_part)
             connection.send(audio_header)
+            bytes_sent = 0
+            if progress_callback is not None:
+                progress_callback(bytes_sent, actual_size)
             with recording.file_path.open("rb") as audio_file:
                 for block in iter(lambda: audio_file.read(64 * 1024), b""):
                     connection.send(block)
+                    bytes_sent += len(block)
+                    if progress_callback is not None:
+                        progress_callback(bytes_sent, actual_size)
             connection.send(closing)
 
             response = connection.getresponse()

@@ -16,6 +16,7 @@ dev = ["pytest>=7,<9"]
 
 [project.scripts]
 pi-recorder = "pi_recorder.main:main"
+pi-recorder-upload = "pi_recorder.manual_upload:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

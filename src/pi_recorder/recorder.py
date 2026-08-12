@@ -4,6 +4,7 @@ from threading import Event
 from typing import Callable, Optional
 
 from pi_recorder.audio import AudioSource
+from pi_recorder.config import DEFAULT_MAX_WAV_BYTES
 from pi_recorder.models import RecordingMetadata
 from pi_recorder.queue import UploadQueue
 from pi_recorder.storage import InvalidAudioFile, StorageManager
@@ -25,6 +26,7 @@ class Recorder:
         chunk_seconds: int,
         retry_seconds: int,
         maintenance: Optional[Callable[[], None]] = None,
+        max_wav_bytes: int = DEFAULT_MAX_WAV_BYTES,
     ) -> None:
         self.audio_source = audio_source
         self.storage = storage
@@ -33,6 +35,7 @@ class Recorder:
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk_seconds = chunk_seconds
+        self.max_wav_bytes = max_wav_bytes
         self.retry_seconds = retry_seconds
         self.maintenance = maintenance
 
@@ -40,6 +43,19 @@ class Recorder:
         recovered = 0
         for candidate in self.storage.recovery_candidates():
             if candidate.name.endswith(".wav") and self.upload_queue.contains_file(candidate):
+                continue
+            try:
+                file_size = candidate.stat().st_size
+            except OSError as exc:
+                LOGGER.error("Could not inspect recovery candidate %s: %s", candidate, exc)
+                continue
+            if file_size > self.max_wav_bytes:
+                LOGGER.error(
+                    "Oversized audio remains unqueued for manual recovery: %s (%d bytes; limit %d)",
+                    candidate,
+                    file_size,
+                    self.max_wav_bytes,
+                )
                 continue
             metadata = self.storage.recover_file(
                 candidate,
@@ -64,6 +80,20 @@ class Recorder:
         if not self.storage.is_valid_wav(target.partial_path):
             detail = result.error or "no valid audio frames were written"
             LOGGER.error("Audio chunk failed and remains unqueued: %s", detail)
+            return None
+
+        try:
+            file_size = target.partial_path.stat().st_size
+        except OSError as exc:
+            LOGGER.error("Could not inspect audio chunk; it remains unqueued: %s", exc)
+            return None
+        if file_size > self.max_wav_bytes:
+            LOGGER.error(
+                "Audio chunk exceeds %d-byte limit and remains unqueued: %s (%d bytes)",
+                self.max_wav_bytes,
+                target.partial_path,
+                file_size,
+            )
             return None
 
         try:

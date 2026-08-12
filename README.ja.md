@@ -26,7 +26,7 @@ Recorder は uploader を待ちません。正常に閉じて検証したファ�
 
 主な対象は Raspberry Pi Zero 2 W（512 MB）、Raspberry Pi OS、USB microphone です。Pi 4／Pi 5 でも動作できる設計です。macOS は FFmpeg AVFoundation を使用する secondary runtime として対応します。I2S input は将来対応とします。
 
-MVP は mono、16 kHz、16-bit PCM WAV を使用し、既定の chunk は 10 分です。WAV は `arecord` のネイティブ形式で encode 負荷がほぼなく、transcription system との互換性も高い一方、10 分で約 18.3 MiB、1 日で約 2.76 GB を使用します。FLAC は可逆圧縮ですが encoder と failure boundary が増えます。Opus はさらに小さいものの非可逆で追加ツールが必要です。将来の compression は capture 後の独立 worker として追加します。
+MVP は mono、16 kHz、16-bit PCM WAV を使用し、既定の chunk は 10 分です。WAV は `arecord` のネイティブ形式で encode 負荷がほぼなく、transcription system との互換性も高い一方、10 分で約 18.3 MiB、1 日で約 2.76 GB を使用します。各 WAV の上限は 98,000,000 bytes です。Audio 設定から推定した chunk size が上限を超える場合は起動を拒否し、予期せず生成された超過 file は保持しますが queue や upload の対象にはしません。FLAC は可逆圧縮ですが encoder と failure boundary が増えます。Opus はさらに小さいものの非可逆で追加ツールが必要です。将来の compression は capture 後の独立 worker として追加します。
 
 ## Raspberry Pi OS の準備
 
@@ -125,6 +125,7 @@ AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 RECORDING_DIR=./data/recordings
 DATABASE_PATH=./data/recorder.db
 CHUNK_MINUTES=10
+MAX_WAV_BYTES=98000000
 SERVER_URL=https://recorder.example.com
 UPLOAD_ENDPOINT=/api/v1/recordings
 API_TOKEN=
@@ -143,6 +144,18 @@ Raspberry Pi では `Device` を `arecord -l` または `arecord -L` に表示�
 ```
 
 `SIGINT` または `SIGTERM` で停止します。現在の有効な partial chunk を閉じ、checksum を計算して queue へ追加してから終了します。
+
+### 録音せず既存 WAV を 1 件 upload する
+
+手動 uploader は同じ `.env` を読み、WAV と 98,000,000-byte 上限を検証して metadata と SHA-256 を生成し、1 回の upload 進捗を progress bar で表示します。
+
+```bash
+.venv/bin/python -m pi_recorder.manual_upload /path/to/audio.wav
+# package installation 後は次も使用できます：
+.venv/bin/pi-recorder-upload /path/to/audio.wav
+```
+
+別の設定を使う場合は `--env-file /path/to/config.env` を追加します。この command は microphone を開かず、SQLite queue へ書き込まず、background retry も source file の削除も行いません。Upload failure は non-zero exit status を返すため、問題を修正してから手動で再実行してください。
 
 ## systemd Service のインストール
 
@@ -181,6 +194,8 @@ Client は `POST {SERVER_URL}{UPLOAD_ENDPOINT}` を `multipart/form-data` で送
 
 HTTP 2xx のみを保存確認とし、それ以外は再試行します。将来の server は recording ID を idempotent に扱い、size と checksum を検証し、durable storage 完了後だけ 2xx を返す必要があります。AI processing は ACK の後で実行し、ingestion を止めない設計にします。
 
+Audio file 自体は最大 98,000,000 bytes ですが、multipart request 全体は少し大きくなります。Reverse proxy と server の request-body limit には余裕を持たせてください。
+
 ## Development とテスト
 
 ```bash
@@ -198,6 +213,7 @@ HTTP 2xx のみを保存確認とし、それ以外は再試行します。将�
 - macOS input error: AVFoundation device list と `AUDIO_DEVICE` を再確認し、terminal application の microphone access を許可します。Hardware の再接続後に index が変わる場合があります。
 - Device error: `arecord -l`、`AUDIO_DEVICE`、group 権限、他 process による microphone 占有を確認します。
 - Pending のまま: HTTPS URL、DNS／Wi-Fi、token、`journalctl` を確認します。Server 停止中も録音は継続します。
+- `WAV file ... maximum`: `CHUNK_MINUTES` を短くするか、sample rate／channels を下げるか、既存 WAV を手動で分割してください。上限超過 file は upload されません。
 - Disk warning: upload／network を復旧してください。低容量時でも確認済み upload 以外は削除しません。
 - Configuration exit: 正の整数値、device ID の文字、HTTPS の `SERVER_URL` を確認します。
 

@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from pi_recorder.config import Config, ConfigError
+from pi_recorder.config import (
+    DEFAULT_MAX_WAV_BYTES,
+    Config,
+    ConfigError,
+    estimated_wav_size_bytes,
+)
 
 
 def test_config_defaults() -> None:
@@ -10,6 +15,7 @@ def test_config_defaults() -> None:
 
     assert config.chunk_minutes == 10
     assert config.chunk_seconds == 600
+    assert config.max_wav_bytes == 98_000_000
     assert config.sample_rate == 16000
     assert config.audio_channels == 1
     assert config.audio_backend == "auto"
@@ -43,6 +49,8 @@ def test_config_loads_env_file_and_environment_override(tmp_path: Path) -> None:
         {"DEVICE_ID": "not valid"},
         {"AUDIO_SAMPLE_FORMAT": "FLOAT_LE"},
         {"AUDIO_BACKEND": "unknown"},
+        {"MAX_WAV_BYTES": str(DEFAULT_MAX_WAV_BYTES + 1)},
+        {"MAX_WAV_BYTES": "1000"},
     ],
 )
 def test_config_rejects_invalid_values(values) -> None:
@@ -54,3 +62,16 @@ def test_config_repr_hides_api_token() -> None:
     config = Config.from_env({"API_TOKEN": "test-secret-value"}, env_file=None)
 
     assert "test-secret-value" not in repr(config)
+
+
+def test_default_chunk_is_well_below_wav_size_limit() -> None:
+    config = Config.from_env({}, env_file=None)
+
+    assert (
+        estimated_wav_size_bytes(
+            config.sample_rate,
+            config.audio_channels,
+            config.chunk_seconds,
+        )
+        < config.max_wav_bytes
+    )

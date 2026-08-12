@@ -7,6 +7,10 @@ from typing import Dict, Mapping, Optional
 from urllib.parse import urlparse
 
 
+DEFAULT_MAX_WAV_BYTES = 98_000_000
+WAV_HEADER_ALLOWANCE_BYTES = 64 * 1024
+
+
 class ConfigError(ValueError):
     pass
 
@@ -46,6 +50,15 @@ def _positive_int(values: Mapping[str, str], name: str, default: int) -> int:
     return value
 
 
+def estimated_wav_size_bytes(
+    sample_rate: int,
+    channels: int,
+    duration_seconds: int,
+) -> int:
+    """Return a conservative size estimate for 16-bit PCM WAV audio."""
+    return sample_rate * channels * 2 * duration_seconds + WAV_HEADER_ALLOWANCE_BYTES
+
+
 @dataclass(frozen=True)
 class Config:
     device_id: str
@@ -70,6 +83,7 @@ class Config:
     min_free_disk_mb: int = 512
     record_retry_seconds: int = 5
     log_level: str = "INFO"
+    max_wav_bytes: int = DEFAULT_MAX_WAV_BYTES
 
     @property
     def chunk_seconds(self) -> int:
@@ -128,6 +142,23 @@ class Config:
             raise ConfigError("AUDIO_BACKEND must be auto, alsa, or avfoundation")
 
         chunk_minutes = _positive_int(values, "CHUNK_MINUTES", 10)
+        max_wav_bytes = _positive_int(values, "MAX_WAV_BYTES", DEFAULT_MAX_WAV_BYTES)
+        if max_wav_bytes > DEFAULT_MAX_WAV_BYTES:
+            raise ConfigError(
+                "MAX_WAV_BYTES must not exceed {} bytes".format(DEFAULT_MAX_WAV_BYTES)
+            )
+        sample_rate = _positive_int(values, "SAMPLE_RATE", 16000)
+        audio_channels = _positive_int(values, "AUDIO_CHANNELS", 1)
+        estimated_size = estimated_wav_size_bytes(
+            sample_rate,
+            audio_channels,
+            chunk_minutes * 60,
+        )
+        if estimated_size > max_wav_bytes:
+            raise ConfigError(
+                "CHUNK_MINUTES, SAMPLE_RATE, and AUDIO_CHANNELS may create a WAV "
+                "larger than MAX_WAV_BYTES (estimated {} bytes)".format(estimated_size)
+            )
         retry_base = _positive_int(values, "RETRY_BASE_SECONDS", 30)
         retry_max = _positive_int(values, "RETRY_MAX_SECONDS", 3600)
         if retry_max < retry_base:
@@ -140,8 +171,9 @@ class Config:
             recording_dir=Path(values.get("RECORDING_DIR", "./data/recordings")).expanduser(),
             database_path=Path(values.get("DATABASE_PATH", "./data/recorder.db")).expanduser(),
             chunk_minutes=chunk_minutes,
-            sample_rate=_positive_int(values, "SAMPLE_RATE", 16000),
-            audio_channels=_positive_int(values, "AUDIO_CHANNELS", 1),
+            max_wav_bytes=max_wav_bytes,
+            sample_rate=sample_rate,
+            audio_channels=audio_channels,
             audio_sample_format=audio_format,
             arecord_binary=values.get("ARECORD_BINARY", "arecord").strip() or "arecord",
             ffmpeg_binary=values.get("FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg",

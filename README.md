@@ -26,7 +26,7 @@ The recorder never waits for the uploader. Only closed, validated files enter th
 
 The primary target is Raspberry Pi Zero 2 W (512 MB) on Raspberry Pi OS with a USB microphone. Pi 4 and Pi 5 are also supported in principle. macOS is a supported secondary runtime through FFmpeg AVFoundation. I2S input is future work.
 
-The MVP uses mono, 16 kHz, 16-bit PCM WAV in 10-minute chunks. WAV is native to `arecord`, has negligible encoding cost, and is widely accepted by transcription systems. It uses about 18.3 MiB per 10 minutes (about 2.76 GB/day). FLAC would reduce storage without loss but adds an encoder and another failure boundary; Opus is smaller but lossy and also needs extra tooling. Compression should later run after capture in a separate worker.
+The MVP uses mono, 16 kHz, 16-bit PCM WAV in 10-minute chunks. WAV is native to `arecord`, has negligible encoding cost, and is widely accepted by transcription systems. It uses about 18.3 MiB per 10 minutes (about 2.76 GB/day). Every WAV is limited to 98,000,000 bytes. Startup rejects audio settings whose estimated chunk size exceeds that ceiling, and an unexpected oversized file is preserved but never queued or uploaded. FLAC would reduce storage without loss but adds an encoder and another failure boundary; Opus is smaller but lossy and also needs extra tooling. Compression should later run after capture in a separate worker.
 
 ## Raspberry Pi OS Setup
 
@@ -125,6 +125,7 @@ AUDIO_DEVICE=plughw:CARD=Device,DEV=0
 RECORDING_DIR=./data/recordings
 DATABASE_PATH=./data/recorder.db
 CHUNK_MINUTES=10
+MAX_WAV_BYTES=98000000
 SERVER_URL=https://recorder.example.com
 UPLOAD_ENDPOINT=/api/v1/recordings
 API_TOKEN=
@@ -143,6 +144,18 @@ On Raspberry Pi, replace `Device` with the USB card name reported by `arecord -l
 ```
 
 Send `SIGINT` or `SIGTERM` to stop. The current valid partial chunk is closed, checksummed, and queued before exit.
+
+### Upload one existing WAV without recording
+
+The manual uploader reads the same `.env`, validates the WAV and 98,000,000-byte limit, calculates metadata and SHA-256, then displays progress while sending one request:
+
+```bash
+.venv/bin/python -m pi_recorder.manual_upload /path/to/audio.wav
+# Equivalent after package installation:
+.venv/bin/pi-recorder-upload /path/to/audio.wav
+```
+
+Use `--env-file /path/to/config.env` to select another configuration file. This command never opens a microphone, writes to the SQLite queue, retries in the background, or deletes the source file. A failed upload returns a non-zero exit status, so rerun it manually after fixing the problem.
 
 ## Install as a systemd Service
 
@@ -181,6 +194,8 @@ The client sends `POST {SERVER_URL}{UPLOAD_ENDPOINT}` as `multipart/form-data` w
 
 Any HTTP 2xx response confirms storage. Other responses retry. The future server must make the recording ID idempotent, verify size and checksum, and return 2xx only after durable storage. AI processing happens after that acknowledgement and must not block ingestion.
 
+The audio file itself is at most 98,000,000 bytes; the complete multipart request is slightly larger. Configure the reverse proxy and server request-body limit accordingly.
+
 ## Development and Testing
 
 ```bash
@@ -198,6 +213,7 @@ Tests use a fake audio source and small generated WAV files; microphone hardware
 - macOS input errors: verify `AUDIO_DEVICE` against the current AVFoundation list and allow microphone access for the terminal application. Device indices may change after reconnecting hardware.
 - Device errors: run `arecord -l`, verify `AUDIO_DEVICE`, group membership, and that no other process owns the microphone.
 - Files remain pending: verify HTTPS URL, DNS/Wi-Fi, token, and `journalctl`; recording continues while the server is unavailable.
+- `WAV file ... maximum`: shorten `CHUNK_MINUTES`, reduce sample rate/channels, or manually split an existing WAV. Oversized files are not uploaded.
 - Disk warning: upload or network service must recover. Only confirmed uploads are removed, even under low-space pressure.
 - Configuration exit: check positive numeric values, the device ID characters, and HTTPS `SERVER_URL`.
 

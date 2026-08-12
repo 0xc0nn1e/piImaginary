@@ -84,6 +84,7 @@ def run(config: Config) -> int:
         sample_rate=config.sample_rate,
         channels=config.audio_channels,
         chunk_seconds=config.chunk_seconds,
+        max_wav_bytes=config.max_wav_bytes,
         retry_seconds=config.record_retry_seconds,
         maintenance=cleanup.run,
     )
@@ -95,6 +96,7 @@ def run(config: Config) -> int:
             config.upload_endpoint,
             config.api_token,
             config.upload_timeout_seconds,
+            config.max_wav_bytes,
         )
         uploader = UploaderWorker(
             upload_queue,

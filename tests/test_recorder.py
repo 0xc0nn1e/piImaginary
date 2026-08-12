@@ -21,7 +21,7 @@ class FakeAudioSource:
         return AudioCaptureResult(True, False, 0)
 
 
-def make_recorder(tmp_path, wav_factory, source):
+def make_recorder(tmp_path, wav_factory, source, max_wav_bytes=98_000_000):
     storage = StorageManager(tmp_path / "recordings")
     upload_queue = UploadQueue(tmp_path / "recorder.db")
     upload_queue.initialize()
@@ -33,6 +33,7 @@ def make_recorder(tmp_path, wav_factory, source):
         sample_rate=16000,
         channels=1,
         chunk_seconds=600,
+        max_wav_bytes=max_wav_bytes,
         retry_seconds=1,
     )
     return recorder, upload_queue
@@ -82,3 +83,25 @@ def test_restart_recovers_unqueued_closed_chunk(tmp_path, wav_factory) -> None:
     recovered = upload_queue.get(target.recording_id)
     assert recovered is not None
     assert recovered.file_path.exists()
+
+
+def test_oversized_recording_remains_unqueued(tmp_path, wav_factory) -> None:
+    source = FakeAudioSource(wav_factory)
+    recorder, upload_queue = make_recorder(tmp_path, wav_factory, source, max_wav_bytes=100)
+
+    recording = recorder.record_one(Event())
+
+    assert recording is None
+    assert upload_queue.count() == 0
+    assert list(recorder.storage.recording_dir.rglob("*.wav.partial"))
+
+
+def test_restart_does_not_queue_oversized_recording(tmp_path, wav_factory) -> None:
+    source = FakeAudioSource(wav_factory)
+    recorder, upload_queue = make_recorder(tmp_path, wav_factory, source, max_wav_bytes=100)
+    target = recorder.storage.create_chunk_target()
+    wav_factory(target.partial_path)
+
+    assert recorder.recover_orphans() == 0
+    assert upload_queue.count() == 0
+    assert target.partial_path.exists()

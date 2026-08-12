@@ -94,6 +94,7 @@ def run_test_server(status=201):
 
 def test_http_client_streams_multipart_contract(metadata_factory) -> None:
     recording = metadata_factory()
+    progress = []
     server, thread = run_test_server()
     client = HttpUploadClient(
         "http://127.0.0.1:{}".format(server.server_port),
@@ -102,7 +103,7 @@ def test_http_client_streams_multipart_contract(metadata_factory) -> None:
         2,
     )
     try:
-        client.upload(recording)
+        client.upload(recording, progress_callback=lambda sent, total: progress.append((sent, total)))
     finally:
         server.shutdown()
         server.server_close()
@@ -113,6 +114,8 @@ def test_http_client_streams_multipart_contract(metadata_factory) -> None:
     assert b'name="metadata"' in server.received_body
     assert b'name="audio"' in server.received_body
     assert recording.checksum_sha256.encode("ascii") in server.received_body
+    assert progress[0] == (0, recording.file_size)
+    assert progress[-1] == (recording.file_size, recording.file_size)
 
 
 def test_http_client_rejects_server_failure(metadata_factory) -> None:
@@ -131,3 +134,17 @@ def test_http_client_rejects_server_failure(metadata_factory) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_http_client_rejects_oversized_wav_before_connecting(metadata_factory) -> None:
+    recording = metadata_factory()
+    client = HttpUploadClient(
+        "https://upload.example.test",
+        "/api/v1/recordings",
+        "",
+        2,
+        max_wav_bytes=recording.file_size - 1,
+    )
+
+    with pytest.raises(UploadError, match="maximum"):
+        client.upload(recording)
