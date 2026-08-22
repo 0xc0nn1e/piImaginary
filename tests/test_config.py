@@ -21,6 +21,12 @@ def test_config_defaults() -> None:
     assert config.audio_backend == "auto"
     assert config.ffmpeg_binary == "ffmpeg"
     assert not config.upload_enabled
+    assert config.heartbeat_endpoint == "/api/v1/heartbeats"
+    assert config.heartbeat_minutes == 10
+    assert config.heartbeat_seconds == 600
+    assert config.heartbeat_timeout_seconds == 30
+    # Heartbeats need somewhere to go, so an empty SERVER_URL disables them too.
+    assert not config.heartbeat_enabled
 
 
 def test_config_loads_env_file_and_environment_override(tmp_path: Path) -> None:
@@ -44,6 +50,11 @@ def test_config_loads_env_file_and_environment_override(tmp_path: Path) -> None:
         {"SERVER_URL": "https://user:password@example.test"},
         {"SERVER_URL": "https://example.test?token=value"},
         {"UPLOAD_ENDPOINT": "/api/v1/recordings?unsafe=true"},
+        {"HEARTBEAT_ENDPOINT": "api/v1/heartbeats"},
+        {"HEARTBEAT_ENDPOINT": "//api/v1/heartbeats"},
+        {"HEARTBEAT_ENDPOINT": "/api/v1/heartbeats#fragment"},
+        {"HEARTBEAT_MINUTES": "0"},
+        {"HEARTBEAT_TIMEOUT_SECONDS": "-1"},
         {"CHUNK_MINUTES": "0"},
         {"RETRY_BASE_SECONDS": "60", "RETRY_MAX_SECONDS": "30"},
         {"DEVICE_ID": "not valid"},
@@ -75,3 +86,25 @@ def test_default_chunk_is_well_below_wav_size_limit() -> None:
         )
         < config.max_wav_bytes
     )
+
+
+def test_heartbeat_follows_server_url() -> None:
+    config = Config.from_env({"SERVER_URL": "https://upload.example.test"}, env_file=None)
+
+    assert config.heartbeat_enabled
+
+
+def test_blank_heartbeat_endpoint_disables_reporting() -> None:
+    config = Config.from_env(
+        {"SERVER_URL": "https://upload.example.test", "HEARTBEAT_ENDPOINT": ""},
+        env_file=None,
+    )
+
+    assert config.upload_enabled
+    assert not config.heartbeat_enabled
+
+
+def test_heartbeat_interval_is_configurable() -> None:
+    config = Config.from_env({"HEARTBEAT_MINUTES": "3"}, env_file=None)
+
+    assert config.heartbeat_seconds == 180

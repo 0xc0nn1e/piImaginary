@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pi_recorder.models import FAILED, PENDING, UPLOADED, UPLOADING, RecordingMetadata
 
@@ -234,6 +234,35 @@ class UploadQueue:
                 "SELECT * FROM recordings WHERE recording_id = ?", (recording_id,)
             ).fetchone()
         return None if row is None else self._row_to_recording(row)
+
+    def statistics(self) -> Dict[str, Any]:
+        """Return read-only queue counts and timestamps for health reporting."""
+        counts: Dict[str, Any] = {PENDING: 0, UPLOADING: 0, UPLOADED: 0, FAILED: 0}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT upload_status, COUNT(*) AS count FROM recordings
+                WHERE local_deleted_at IS NULL
+                GROUP BY upload_status
+                """
+            ).fetchall()
+            for row in rows:
+                counts[row["upload_status"]] = int(row["count"])
+            # Locally deleted rows stay in the upload history, so they are not filtered
+            # out here; a cleanup pass must not look like uploads have stopped.
+            summary = connection.execute(
+                """
+                SELECT
+                    MIN(CASE WHEN upload_status IN (?, ?) THEN created_at END)
+                        AS oldest_pending_created_at,
+                    MAX(uploaded_at) AS last_uploaded_at
+                FROM recordings
+                """,
+                (PENDING, FAILED),
+            ).fetchone()
+        counts["oldest_pending_created_at"] = summary["oldest_pending_created_at"]
+        counts["last_uploaded_at"] = summary["last_uploaded_at"]
+        return counts
 
     def count(self) -> int:
         with self._connect() as connection:

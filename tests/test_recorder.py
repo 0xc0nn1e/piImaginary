@@ -1,6 +1,7 @@
 from threading import Event
 
 from pi_recorder.audio import AudioCaptureResult
+from pi_recorder.health import RecorderHealth
 from pi_recorder.queue import UploadQueue
 from pi_recorder.recorder import Recorder
 from pi_recorder.storage import StorageManager
@@ -21,7 +22,7 @@ class FakeAudioSource:
         return AudioCaptureResult(True, False, 0)
 
 
-def make_recorder(tmp_path, wav_factory, source, max_wav_bytes=98_000_000):
+def make_recorder(tmp_path, wav_factory, source, max_wav_bytes=98_000_000, health=None):
     storage = StorageManager(tmp_path / "recordings")
     upload_queue = UploadQueue(tmp_path / "recorder.db")
     upload_queue.initialize()
@@ -35,6 +36,7 @@ def make_recorder(tmp_path, wav_factory, source, max_wav_bytes=98_000_000):
         chunk_seconds=600,
         max_wav_bytes=max_wav_bytes,
         retry_seconds=1,
+        health=health,
     )
     return recorder, upload_queue
 
@@ -105,3 +107,61 @@ def test_restart_does_not_queue_oversized_recording(tmp_path, wav_factory) -> No
     assert recorder.recover_orphans() == 0
     assert upload_queue.count() == 0
     assert target.partial_path.exists()
+
+
+class FailingAudioSource:
+    def record(self, output_path, duration_seconds, stop_event):
+        # Nothing is written, so finalization must reject the chunk.
+        return AudioCaptureResult(False, False, 1, "arecord: device busy")
+
+
+def test_health_tracks_a_successful_chunk(tmp_path, wav_factory) -> None:
+    health = RecorderHealth()
+    source = FakeAudioSource(wav_factory)
+    recorder, _ = make_recorder(tmp_path, wav_factory, source, health=health)
+
+    recording = recorder.record_one(Event())
+
+    snapshot = health.snapshot()
+    assert snapshot["chunks_completed"] == 1
+    assert snapshot["last_chunk_filename"] == recording.filename
+    assert snapshot["consecutive_capture_failures"] == 0
+    assert snapshot["seconds_since_last_chunk"] is not None
+
+
+def test_health_counts_consecutive_capture_failures(tmp_path, wav_factory) -> None:
+    health = RecorderHealth()
+    recorder, _ = make_recorder(tmp_path, wav_factory, FailingAudioSource(), health=health)
+
+    assert recorder.record_one(Event()) is None
+    assert recorder.record_one(Event()) is None
+
+    snapshot = health.snapshot()
+    assert snapshot["consecutive_capture_failures"] == 2
+    assert "device busy" in snapshot["last_capture_error"]
+    assert snapshot["last_chunk_completed_at"] is None
+
+
+def test_health_records_an_oversized_chunk_as_a_failure(tmp_path, wav_factory) -> None:
+    health = RecorderHealth()
+    source = FakeAudioSource(wav_factory)
+    recorder, _ = make_recorder(tmp_path, wav_factory, source, max_wav_bytes=100, health=health)
+
+    assert recorder.record_one(Event()) is None
+
+    snapshot = health.snapshot()
+    assert snapshot["consecutive_capture_failures"] == 1
+    assert "100-byte limit" in snapshot["last_capture_error"]
+
+
+def test_health_recovers_after_a_failure(tmp_path, wav_factory) -> None:
+    health = RecorderHealth()
+    recorder, _ = make_recorder(tmp_path, wav_factory, FailingAudioSource(), health=health)
+    recorder.record_one(Event())
+    recorder.audio_source = FakeAudioSource(wav_factory)
+
+    assert recorder.record_one(Event()) is not None
+
+    snapshot = health.snapshot()
+    assert snapshot["consecutive_capture_failures"] == 0
+    assert snapshot["last_capture_error"] is None

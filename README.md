@@ -18,6 +18,8 @@ USB microphone -> ALSA arecord (Linux) / FFmpeg AVFoundation (macOS)
                                      uploader thread over HTTPS
                                                   v
                                            remote server API
+                                                  ^
+                                     heartbeat thread every 10 min
 ```
 
 The recorder never waits for the uploader. Only closed, validated files enter the queue. A reboot changes stale `uploading` entries back to `pending`; failed uploads use capped exponential backoff. Cleanup selects only server-confirmed `uploaded` files.
@@ -129,11 +131,13 @@ MAX_WAV_BYTES=98000000
 SERVER_URL=https://recorder.example.com
 UPLOAD_ENDPOINT=/api/v1/recordings
 API_TOKEN=
+HEARTBEAT_ENDPOINT=/api/v1/heartbeats
+HEARTBEAT_MINUTES=10
 RETENTION_DAYS=7
 MIN_FREE_DISK_MB=512
 ```
 
-`SERVER_URL` must use HTTPS. Leave it empty to record and queue locally without uploading. Never commit `.env`, tokens, databases, or recordings.
+`SERVER_URL` must use HTTPS. Leave it empty to record and queue locally without uploading. `HEARTBEAT_ENDPOINT` reports device health every `HEARTBEAT_MINUTES`; leave it empty to disable reporting. Never commit `.env`, tokens, databases, or recordings.
 
 On Raspberry Pi, replace `Device` with the USB card name reported by `arecord -l` or `arecord -L`. On macOS, use `AUDIO_BACKEND=avfoundation` and replace `AUDIO_DEVICE` with the USB index reported by FFmpeg.
 
@@ -196,6 +200,72 @@ Any HTTP 2xx response confirms storage. Other responses retry. The future server
 
 The audio file itself is at most 98,000,000 bytes; the complete multipart request is slightly larger. Configure the reverse proxy and server request-body limit accordingly.
 
+## Heartbeat API Contract
+
+Every `HEARTBEAT_MINUTES` the client sends `POST {SERVER_URL}{HEARTBEAT_ENDPOINT}` with an `application/json` body, plus `X-Device-ID` and `Authorization: Bearer …` when a token is configured. Any HTTP 2xx accepts the report; anything else is logged as a warning and skipped until the next interval. Heartbeats are never queued, never retried, and never touch the SQLite database or the microSD card, so reporting failures cannot affect recording.
+
+The client sends `status` `starting` on launch, `running` on each interval, and `stopping` during a clean shutdown. A missing `stopping` beat therefore separates a crash or power loss from an orderly restart.
+
+Every value under `system` may be `null`, because macOS has no `/proc`. Queue counts become `null` if the database cannot be read.
+
+```json
+{
+  "schema_version": 1,
+  "device_id": "pi-recorder-01",
+  "sent_at": "2026-08-23T04:00:00.000000+00:00",
+  "status": "running",
+  "recorder": {
+    "audio_backend": "alsa",
+    "audio_device": "plughw:CARD=Device,DEV=0",
+    "chunk_seconds": 600,
+    "process_uptime_seconds": 25201.4,
+    "chunks_completed": 42,
+    "last_chunk_completed_at": "2026-08-23T03:58:11.000000+00:00",
+    "seconds_since_last_chunk": 109.0,
+    "last_chunk_filename": "2026-08-23/20260823T034811Z_ab12cd.wav",
+    "last_chunk_duration_seconds": 600.0,
+    "consecutive_capture_failures": 0,
+    "last_capture_error": null,
+    "last_capture_error_at": null
+  },
+  "queue": {
+    "pending": 0,
+    "uploading": 0,
+    "failed": 0,
+    "uploaded": 41,
+    "oldest_pending_created_at": null,
+    "oldest_pending_age_seconds": null,
+    "last_uploaded_at": "2026-08-23T03:58:14.000000+00:00",
+    "seconds_since_last_upload": 106.0
+  },
+  "system": {
+    "hostname": "pi-recorder-01",
+    "platform": "Linux",
+    "uptime_seconds": 90431.2,
+    "load_average_1m": 0.21,
+    "load_average_5m": 0.18,
+    "load_average_15m": 0.14,
+    "cpu_count": 4,
+    "memory_total_bytes": 444030976,
+    "memory_available_bytes": 301989888,
+    "swap_total_bytes": 104857600,
+    "swap_free_bytes": 104857600,
+    "cpu_temperature_celsius": 48.3,
+    "recording_disk_total_bytes": 31000000000,
+    "recording_disk_free_bytes": 19200000000,
+    "min_free_disk_mb": 512
+  }
+}
+```
+
+The server should alert on three conditions:
+
+1. No heartbeat for more than `2.5 x HEARTBEAT_MINUTES` (25 minutes by default). The device is offline or the process died; the absence of a report is the signal, not a field inside it.
+2. `recorder.seconds_since_last_chunk` above `2.5 x chunk_seconds`, or `recorder.consecutive_capture_failures` above zero. The process is alive but capture is broken, which usually means an unplugged USB microphone or a changed ALSA device name.
+3. `queue.pending` plus `queue.failed` rising over time, or `system.recording_disk_free_bytes` near `system.min_free_disk_mb`. Uploads are backing up and the microSD card will fill.
+
+Leave `HEARTBEAT_ENDPOINT` empty to disable reporting. It also requires `SERVER_URL`.
+
 ## Development and Testing
 
 ```bash
@@ -216,7 +286,8 @@ Tests use a fake audio source and small generated WAV files; microphone hardware
 - `WAV file ... maximum`: shorten `CHUNK_MINUTES`, reduce sample rate/channels, or manually split an existing WAV. Oversized files are not uploaded.
 - Disk warning: upload or network service must recover. Only confirmed uploads are removed, even under low-space pressure.
 - Configuration exit: check positive numeric values, the device ID characters, and HTTPS `SERVER_URL`.
+- `Heartbeat (running) failed`: reporting could not reach the server. Recording and uploading are unaffected; verify `HEARTBEAT_ENDPOINT` and that the server accepts JSON there.
 
 ## Roadmap
 
-Possible follow-ups include post-capture FLAC compression, I2S sources, button/LED control, VAD, encryption at rest, remote configuration, and health reporting. These must preserve the simple audio-source boundary and the rule that unconfirmed recordings are never deleted.
+Possible follow-ups include post-capture FLAC compression, I2S sources, button/LED control, VAD, encryption at rest, and remote configuration. These must preserve the simple audio-source boundary and the rule that unconfirmed recordings are never deleted.

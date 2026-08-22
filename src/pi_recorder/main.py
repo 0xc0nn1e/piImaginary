@@ -1,6 +1,7 @@
 import logging
 import signal
 import threading
+from functools import partial
 from threading import Event
 from types import FrameType
 from typing import Optional
@@ -13,6 +14,12 @@ from pi_recorder.audio import (
 )
 from pi_recorder.cleanup import CleanupManager
 from pi_recorder.config import Config, ConfigError
+from pi_recorder.health import RecorderHealth, build_heartbeat_payload
+from pi_recorder.heartbeat import (
+    SHUTDOWN_TIMEOUT_SECONDS,
+    HeartbeatWorker,
+    HttpHeartbeatClient,
+)
 from pi_recorder.logging_config import configure_logging
 from pi_recorder.queue import UploadQueue
 from pi_recorder.recorder import Recorder
@@ -75,6 +82,7 @@ def run(config: Config) -> int:
     )
     cleanup.run()
 
+    health = RecorderHealth()
     audio_source = build_audio_source(config)
     recorder = Recorder(
         audio_source=audio_source,
@@ -87,6 +95,7 @@ def run(config: Config) -> int:
         max_wav_bytes=config.max_wav_bytes,
         retry_seconds=config.record_retry_seconds,
         maintenance=cleanup.run,
+        health=health,
     )
 
     uploader_thread = None
@@ -115,6 +124,33 @@ def run(config: Config) -> int:
     else:
         LOGGER.warning("SERVER_URL is empty; recordings will remain queued locally")
 
+    heartbeat_thread = None
+    if config.heartbeat_enabled:
+        heartbeat = HeartbeatWorker(
+            HttpHeartbeatClient(
+                config.server_url,
+                config.heartbeat_endpoint,
+                config.api_token,
+                config.device_id,
+                config.heartbeat_timeout_seconds,
+            ),
+            partial(build_heartbeat_payload, config, health, upload_queue, storage),
+            interval_seconds=config.heartbeat_seconds,
+            shutdown_timeout_seconds=min(
+                config.heartbeat_timeout_seconds,
+                SHUTDOWN_TIMEOUT_SECONDS,
+            ),
+        )
+        heartbeat_thread = threading.Thread(
+            target=heartbeat.run,
+            args=(stop_event,),
+            name="pi-recorder-heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+    else:
+        LOGGER.info("Heartbeat reporting is disabled")
+
     try:
         recorder.run(stop_event)
     finally:
@@ -123,6 +159,10 @@ def run(config: Config) -> int:
             uploader_thread.join(timeout=10.0)
             if uploader_thread.is_alive():
                 LOGGER.warning("Uploader did not stop before the shutdown deadline")
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=8.0)
+            if heartbeat_thread.is_alive():
+                LOGGER.warning("Heartbeat did not stop before the shutdown deadline")
     return 0
 
 

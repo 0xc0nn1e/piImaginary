@@ -18,6 +18,8 @@ USB microphone -> ALSA arecord（Linux）/ FFmpeg AVFoundation（macOS）
                                          HTTPS uploader thread
                                                   v
                                             remote server API
+                                                  ^
+                                      heartbeat thread 每 10 分鐘
 ```
 
 Recorder 永遠唔等 uploader。只有已關閉兼驗證成功嘅檔案先入 queue。重啟時，殘留嘅 `uploading` 會還原做 `pending`；失敗 upload 會用有上限嘅 exponential backoff。Cleanup 只會揀 server 已確認嘅 `uploaded` 檔案。
@@ -131,11 +133,13 @@ MAX_WAV_BYTES=98000000
 SERVER_URL=https://recorder.example.com
 UPLOAD_ENDPOINT=/api/v1/recordings
 API_TOKEN=
+HEARTBEAT_ENDPOINT=/api/v1/heartbeats
+HEARTBEAT_MINUTES=10
 RETENTION_DAYS=7
 MIN_FREE_DISK_MB=512
 ```
 
-`SERVER_URL` 必須用 HTTPS。留空就只錄音及保存在本機 queue，唔會 upload。永遠唔好 commit `.env`、token、database 或錄音。
+`SERVER_URL` 必須用 HTTPS。留空就只錄音及保存在本機 queue，唔會 upload。`HEARTBEAT_ENDPOINT` 每隔 `HEARTBEAT_MINUTES` 上報裝置健康狀態，留空即停用。永遠唔好 commit `.env`、token、database 或錄音。
 
 Raspberry Pi 要將 `Device` 換成 `arecord -l` 或 `arecord -L` 顯示嘅 USB card name。macOS 就設定 `AUDIO_BACKEND=avfoundation`，並將 `AUDIO_DEVICE` 換成 FFmpeg 顯示嘅 USB index。
 
@@ -198,6 +202,72 @@ Client 用 `multipart/form-data` 發送 `POST {SERVER_URL}{UPLOAD_ENDPOINT}`：
 
 Audio file 本身最多 98,000,000 bytes；完整 multipart request 會稍大，所以 reverse proxy 同 server request-body limit 要預留額外空間。
 
+## Heartbeat API Contract
+
+每隔 `HEARTBEAT_MINUTES`，client 會發送 `POST {SERVER_URL}{HEARTBEAT_ENDPOINT}`，body 係 `application/json`，另加 `X-Device-ID`，設定咗 token 就有 `Authorization: Bearer …`。任何 HTTP 2xx 代表 server 已接收；其他 response 只會記低一條 warning，等下一個週期再發。心跳唔會入 queue、唔會 retry、亦唔會寫 SQLite 或 microSD，所以上報失敗絕對唔會影響錄音。
+
+Client 啟動時發 `status` 為 `starting`，每個週期發 `running`，正常關機時發 `stopping`。冇收到 `stopping` 就可以分辨到 crash／斷電同正常重啟。
+
+`system` 下面每個值都可能係 `null`，因為 macOS 冇 `/proc`。如果 database 讀唔到，queue 數字亦會變 `null`。
+
+```json
+{
+  "schema_version": 1,
+  "device_id": "pi-recorder-01",
+  "sent_at": "2026-08-23T04:00:00.000000+00:00",
+  "status": "running",
+  "recorder": {
+    "audio_backend": "alsa",
+    "audio_device": "plughw:CARD=Device,DEV=0",
+    "chunk_seconds": 600,
+    "process_uptime_seconds": 25201.4,
+    "chunks_completed": 42,
+    "last_chunk_completed_at": "2026-08-23T03:58:11.000000+00:00",
+    "seconds_since_last_chunk": 109.0,
+    "last_chunk_filename": "2026-08-23/20260823T034811Z_ab12cd.wav",
+    "last_chunk_duration_seconds": 600.0,
+    "consecutive_capture_failures": 0,
+    "last_capture_error": null,
+    "last_capture_error_at": null
+  },
+  "queue": {
+    "pending": 0,
+    "uploading": 0,
+    "failed": 0,
+    "uploaded": 41,
+    "oldest_pending_created_at": null,
+    "oldest_pending_age_seconds": null,
+    "last_uploaded_at": "2026-08-23T03:58:14.000000+00:00",
+    "seconds_since_last_upload": 106.0
+  },
+  "system": {
+    "hostname": "pi-recorder-01",
+    "platform": "Linux",
+    "uptime_seconds": 90431.2,
+    "load_average_1m": 0.21,
+    "load_average_5m": 0.18,
+    "load_average_15m": 0.14,
+    "cpu_count": 4,
+    "memory_total_bytes": 444030976,
+    "memory_available_bytes": 301989888,
+    "swap_total_bytes": 104857600,
+    "swap_free_bytes": 104857600,
+    "cpu_temperature_celsius": 48.3,
+    "recording_disk_total_bytes": 31000000000,
+    "recording_disk_free_bytes": 19200000000,
+    "min_free_disk_mb": 512
+  }
+}
+```
+
+Server 應該就三種情況發出告警：
+
+1. 超過 `2.5 x HEARTBEAT_MINUTES`（預設 25 分鐘）冇收到心跳。裝置離線或者 process 死咗；訊號係「收唔到報告」本身，唔係報告入面某個欄位。
+2. `recorder.seconds_since_last_chunk` 超過 `2.5 x chunk_seconds`，或者 `recorder.consecutive_capture_failures` 大過零。Process 生存但錄音壞咗，通常係 USB microphone 被拔或者 ALSA device name 變咗。
+3. `queue.pending` 加 `queue.failed` 持續上升，或者 `system.recording_disk_free_bytes` 接近 `system.min_free_disk_mb`。Upload 積壓緊，microSD 會滿。
+
+`HEARTBEAT_ENDPOINT` 留空即停用上報，另外亦需要設定 `SERVER_URL`。
+
 ## Development 同測試
 
 ```bash
@@ -218,7 +288,8 @@ Audio file 本身最多 98,000,000 bytes；完整 multipart request 會稍大，
 - `WAV file ... maximum`：縮短 `CHUNK_MINUTES`、降低 sample rate／channels，或者先手動分割現有 WAV；超限檔唔會 upload。
 - Disk warning：要恢復 upload／網絡服務；即使低空間，程式都只會移除已確認 upload 嘅檔。
 - Configuration exit：檢查數值係正整數、device ID 字元，同 `SERVER_URL` 是否 HTTPS。
+- `Heartbeat (running) failed`：上報去唔到 server。錄音同 upload 唔受影響；檢查 `HEARTBEAT_ENDPOINT`，同 server 喺嗰個 path 有冇收 JSON。
 
 ## Roadmap
 
-日後可考慮 capture 後 FLAC compression、I2S source、button／LED、VAD、at-rest encryption、remote configuration 同 health reporting。所有改動都要保留簡單 audio-source boundary，同「未確認 upload 嘅錄音永不刪除」規則。
+日後可考慮 capture 後 FLAC compression、I2S source、button／LED、VAD、at-rest encryption、同 remote configuration。所有改動都要保留簡單 audio-source boundary，同「未確認 upload 嘅錄音永不刪除」規則。

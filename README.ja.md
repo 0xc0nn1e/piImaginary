@@ -18,6 +18,8 @@ USB microphone -> ALSA arecord（Linux）/ FFmpeg AVFoundation（macOS）
                                          HTTPS uploader thread
                                                   v
                                             remote server API
+                                                  ^
+                                      heartbeat thread 10 分ごと
 ```
 
 Recorder は uploader を待ちません。正常に閉じて検証したファイルだけを queue に追加します。再起動時には残った `uploading` を `pending` に戻し、失敗した upload は上限付き exponential backoff で再試行します。Cleanup の対象は server が確認済みの `uploaded` ファイルだけです。
@@ -129,11 +131,13 @@ MAX_WAV_BYTES=98000000
 SERVER_URL=https://recorder.example.com
 UPLOAD_ENDPOINT=/api/v1/recordings
 API_TOKEN=
+HEARTBEAT_ENDPOINT=/api/v1/heartbeats
+HEARTBEAT_MINUTES=10
 RETENTION_DAYS=7
 MIN_FREE_DISK_MB=512
 ```
 
-`SERVER_URL` は HTTPS が必須です。空欄の場合は録音とローカル queue 保存だけを行います。`.env`、token、database、録音ファイルは commit しないでください。
+`SERVER_URL` は HTTPS が必須です。空欄の場合は録音とローカル queue 保存だけを行います。`HEARTBEAT_ENDPOINT` は `HEARTBEAT_MINUTES` ごとにデバイスの健康状態を上報します。空欄にすると無効になります。`.env`、token、database、録音ファイルは commit しないでください。
 
 Raspberry Pi では `Device` を `arecord -l` または `arecord -L` に表示された USB card name に置き換えます。macOS では `AUDIO_BACKEND=avfoundation` を設定し、`AUDIO_DEVICE` を FFmpeg が表示した USB index に置き換えます。
 
@@ -196,6 +200,72 @@ HTTP 2xx のみを保存確認とし、それ以外は再試行します。将�
 
 Audio file 自体は最大 98,000,000 bytes ですが、multipart request 全体は少し大きくなります。Reverse proxy と server の request-body limit には余裕を持たせてください。
 
+## Heartbeat API Contract
+
+`HEARTBEAT_MINUTES` ごとに client は `POST {SERVER_URL}{HEARTBEAT_ENDPOINT}` を送信します。body は `application/json` で、`X-Device-ID` と、token を設定した場合は `Authorization: Bearer …` を付けます。HTTP 2xx なら受理、それ以外は warning を記録して次の周期まで見送ります。Heartbeat は queue に入らず、retry せず、SQLite にも microSD にも書き込まないため、上報の失敗が録音に影響することはありません。
+
+Client は起動時に `status` `starting`、各周期で `running`、正常終了時に `stopping` を送ります。`stopping` が届かないことで、crash や電源断と通常の再起動を区別できます。
+
+macOS には `/proc` がないため、`system` 配下の値はすべて `null` になり得ます。Database を読めない場合は queue の数値も `null` になります。
+
+```json
+{
+  "schema_version": 1,
+  "device_id": "pi-recorder-01",
+  "sent_at": "2026-08-23T04:00:00.000000+00:00",
+  "status": "running",
+  "recorder": {
+    "audio_backend": "alsa",
+    "audio_device": "plughw:CARD=Device,DEV=0",
+    "chunk_seconds": 600,
+    "process_uptime_seconds": 25201.4,
+    "chunks_completed": 42,
+    "last_chunk_completed_at": "2026-08-23T03:58:11.000000+00:00",
+    "seconds_since_last_chunk": 109.0,
+    "last_chunk_filename": "2026-08-23/20260823T034811Z_ab12cd.wav",
+    "last_chunk_duration_seconds": 600.0,
+    "consecutive_capture_failures": 0,
+    "last_capture_error": null,
+    "last_capture_error_at": null
+  },
+  "queue": {
+    "pending": 0,
+    "uploading": 0,
+    "failed": 0,
+    "uploaded": 41,
+    "oldest_pending_created_at": null,
+    "oldest_pending_age_seconds": null,
+    "last_uploaded_at": "2026-08-23T03:58:14.000000+00:00",
+    "seconds_since_last_upload": 106.0
+  },
+  "system": {
+    "hostname": "pi-recorder-01",
+    "platform": "Linux",
+    "uptime_seconds": 90431.2,
+    "load_average_1m": 0.21,
+    "load_average_5m": 0.18,
+    "load_average_15m": 0.14,
+    "cpu_count": 4,
+    "memory_total_bytes": 444030976,
+    "memory_available_bytes": 301989888,
+    "swap_total_bytes": 104857600,
+    "swap_free_bytes": 104857600,
+    "cpu_temperature_celsius": 48.3,
+    "recording_disk_total_bytes": 31000000000,
+    "recording_disk_free_bytes": 19200000000,
+    "min_free_disk_mb": 512
+  }
+}
+```
+
+Server 側では次の 3 条件で警報を出してください。
+
+1. `2.5 x HEARTBEAT_MINUTES`（既定で 25 分）を超えて heartbeat が届かない。デバイスが offline か process が停止しています。報告そのものが届かないことが signal であり、報告内の項目ではありません。
+2. `recorder.seconds_since_last_chunk` が `2.5 x chunk_seconds` を超える、または `recorder.consecutive_capture_failures` が 0 より大きい。Process は生きているが capture が壊れており、多くは USB microphone の抜けか ALSA device name の変化です。
+3. `queue.pending` と `queue.failed` の合計が増え続ける、または `system.recording_disk_free_bytes` が `system.min_free_disk_mb` に近づく。Upload が滞留し、microSD が満杯になります。
+
+`HEARTBEAT_ENDPOINT` を空にすると上報を無効化できます。`SERVER_URL` の設定も必要です。
+
 ## Development とテスト
 
 ```bash
@@ -216,7 +286,8 @@ Audio file 自体は最大 98,000,000 bytes ですが、multipart request 全体
 - `WAV file ... maximum`: `CHUNK_MINUTES` を短くするか、sample rate／channels を下げるか、既存 WAV を手動で分割してください。上限超過 file は upload されません。
 - Disk warning: upload／network を復旧してください。低容量時でも確認済み upload 以外は削除しません。
 - Configuration exit: 正の整数値、device ID の文字、HTTPS の `SERVER_URL` を確認します。
+- `Heartbeat (running) failed`: 上報が server に届いていません。録音と upload には影響しません。`HEARTBEAT_ENDPOINT` と、server がその path で JSON を受け取るかを確認します。
 
 ## Roadmap
 
-Capture 後の FLAC compression、I2S source、button／LED、VAD、at-rest encryption、remote configuration、health reporting を将来候補とします。追加時も単純な audio-source boundary と「未確認 upload の録音は削除しない」規則を守ります。
+Capture 後の FLAC compression、I2S source、button／LED、VAD、at-rest encryption、remote configuration を将来候補とします。追加時も単純な audio-source boundary と「未確認 upload の録音は削除しない」規則を守ります。

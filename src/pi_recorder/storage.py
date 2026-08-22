@@ -190,8 +190,11 @@ class StorageManager:
                 if candidate.is_file() and not candidate.is_symlink():
                     yield candidate
 
+    def disk_usage(self) -> Tuple[int, int, int]:
+        return shutil.disk_usage(str(self.recording_dir))
+
     def free_bytes(self) -> int:
-        return shutil.disk_usage(str(self.recording_dir)).free
+        return self.disk_usage().free
 
     def unlink_recording(self, path: Path) -> bool:
         if path.is_symlink():

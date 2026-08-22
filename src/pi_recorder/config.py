@@ -50,6 +50,25 @@ def _positive_int(values: Mapping[str, str], name: str, default: int) -> int:
     return value
 
 
+def _endpoint(
+    values: Mapping[str, str],
+    name: str,
+    default: str,
+    allow_blank: bool = False,
+) -> str:
+    endpoint = values.get(name, default).strip()
+    if allow_blank and not endpoint:
+        return ""
+    if (
+        not endpoint.startswith("/")
+        or endpoint.startswith("//")
+        or "?" in endpoint
+        or "#" in endpoint
+    ):
+        raise ConfigError("{} must start with one slash".format(name))
+    return endpoint
+
+
 def estimated_wav_size_bytes(
     sample_rate: int,
     channels: int,
@@ -77,6 +96,9 @@ class Config:
     api_token: str = field(repr=False)
     upload_timeout_seconds: int = 60
     upload_poll_seconds: int = 10
+    heartbeat_endpoint: str = "/api/v1/heartbeats"
+    heartbeat_minutes: int = 10
+    heartbeat_timeout_seconds: int = 30
     retry_base_seconds: int = 30
     retry_max_seconds: int = 3600
     retention_days: int = 7
@@ -92,6 +114,14 @@ class Config:
     @property
     def upload_enabled(self) -> bool:
         return bool(self.server_url)
+
+    @property
+    def heartbeat_seconds(self) -> int:
+        return self.heartbeat_minutes * 60
+
+    @property
+    def heartbeat_enabled(self) -> bool:
+        return bool(self.server_url and self.heartbeat_endpoint)
 
     @classmethod
     def from_env(
@@ -116,14 +146,14 @@ class Config:
             except ValueError as exc:
                 raise ConfigError("SERVER_URL contains an invalid port") from exc
 
-        endpoint = values.get("UPLOAD_ENDPOINT", "/api/v1/recordings").strip()
-        if (
-            not endpoint.startswith("/")
-            or endpoint.startswith("//")
-            or "?" in endpoint
-            or "#" in endpoint
-        ):
-            raise ConfigError("UPLOAD_ENDPOINT must start with one slash")
+        endpoint = _endpoint(values, "UPLOAD_ENDPOINT", "/api/v1/recordings")
+        # An empty HEARTBEAT_ENDPOINT disables reporting, mirroring an empty SERVER_URL.
+        heartbeat_endpoint = _endpoint(
+            values,
+            "HEARTBEAT_ENDPOINT",
+            "/api/v1/heartbeats",
+            allow_blank=True,
+        )
 
         device_id = values.get("DEVICE_ID", socket.gethostname()).strip()
         if not device_id or not re.fullmatch(r"[A-Za-z0-9._-]+", device_id):
@@ -182,6 +212,9 @@ class Config:
             api_token=values.get("API_TOKEN", ""),
             upload_timeout_seconds=_positive_int(values, "UPLOAD_TIMEOUT_SECONDS", 60),
             upload_poll_seconds=_positive_int(values, "UPLOAD_POLL_SECONDS", 10),
+            heartbeat_endpoint=heartbeat_endpoint,
+            heartbeat_minutes=_positive_int(values, "HEARTBEAT_MINUTES", 10),
+            heartbeat_timeout_seconds=_positive_int(values, "HEARTBEAT_TIMEOUT_SECONDS", 30),
             retry_base_seconds=retry_base,
             retry_max_seconds=retry_max,
             retention_days=_positive_int(values, "RETENTION_DAYS", 7),
